@@ -22,15 +22,16 @@ In this project, you'll build Provenance Guard: a backend system that any creati
 - Capture Creator's Reasoning for the appeal
 - Log the appeal in the JSONL file 
 - Update the status of the JSON output as "Under Review"
+- I DO NOT NEED TO DO ANYTHING ABOUT APPEALS RESOLUTION
 
 # Rate-Limit
-- Rate-Limit on a per user basis of 1 query per second
+- Rate-Limit on a per user basis of 1 query per second (I Only have 1 user right now, so don't need to implement anytype of user identity system)
 - Allows for normal users to regularly post content and make switches w/o having bots continuously upload content and overload the LLM
 - As userbase grows, would swtich to a total system based rate limit while also having the user rate limit (DO NOT IMPLEMENT THIS FOR NOW)
 
 # Audit Log 
 - Put the original text-based content, attribution result, confidence score, and transperency label text, as well as another column for "Under Review" status, and date and time
 - Limit the original content to the first 200 characters, and the attribution result to the first 150 characters. 
-
+- Place unique content ID in each of the audits, so appeals know which record to appeal
 
 
