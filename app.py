@@ -71,9 +71,17 @@ def init_db():
                 attribution     TEXT,
                 confidence      REAL,
                 label           TEXT,
-                status          TEXT DEFAULT 'classified'
+                status          TEXT DEFAULT 'classified',
+                signal1_score   REAL DEFAULT 0.0,
+                signal2_score   REAL DEFAULT 0.0
             )
         """)
+        # Migrate existing databases that predate the signal score columns
+        for col_def in ("signal1_score REAL DEFAULT 0.0", "signal2_score REAL DEFAULT 0.0"):
+            try:
+                conn.execute(f"ALTER TABLE submissions ADD COLUMN {col_def}")
+            except sqlite3.OperationalError:
+                pass  # column already exists
         conn.execute("""
             CREATE TABLE IF NOT EXISTS appeals (
                 appeal_id         TEXT PRIMARY KEY,
@@ -299,7 +307,7 @@ def home():
 
 
 @app.route("/submit", methods=["POST"])
-@limiter.limit("1 per second")
+@limiter.limit("10 per minute;100 per day")
 def submit():
     data = request.get_json()
     if not data or not data.get("text"):
@@ -315,7 +323,7 @@ def submit():
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
-            "INSERT INTO submissions VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO submissions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 content_id,
                 creator_id,
@@ -325,6 +333,8 @@ def submit():
                 result["confidence"],
                 result["label"],
                 "classified",
+                result["signal1_score"],
+                result["signal2_score"],
             ),
         )
 
@@ -384,7 +394,11 @@ def get_log():
     with sqlite3.connect(DB_PATH) as conn:
         conn.row_factory = sqlite3.Row
         rows = conn.execute(
-            "SELECT * FROM submissions ORDER BY timestamp DESC LIMIT ?", (limit,)
+            """SELECT s.*, a.creator_reasoning AS appeal_reasoning
+               FROM submissions s
+               LEFT JOIN appeals a ON s.content_id = a.content_id
+               ORDER BY s.timestamp DESC LIMIT ?""",
+            (limit,),
         ).fetchall()
     return jsonify([dict(row) for row in rows])
 
