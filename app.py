@@ -1,7 +1,9 @@
 import os
+import re
 import uuid
 import sqlite3
 import json
+import statistics
 from datetime import datetime, timezone
 
 from flask import Flask, request, jsonify, render_template_string
@@ -46,6 +48,15 @@ Guidelines:
 - Only assign confidence above 0.85 when the signal is clear and strong
 - Lean toward "uncertain" when unsure"""
 
+# Formal transition phrases that appear more frequently in AI-generated writing
+TRANSITION_PHRASES = {
+    "however", "moreover", "furthermore", "in conclusion", "notably",
+    "in addition", "consequently", "therefore", "additionally",
+    "it is important to note", "it is worth noting", "in summary",
+    "to summarize", "as a result", "on the other hand", "with that said",
+    "in contrast", "for instance", "in this regard", "to elaborate",
+}
+
 
 # ── Database ──────────────────────────────────────────────────────────────────
 
@@ -89,6 +100,91 @@ def classify_text(text):
         response_format={"type": "json_object"},
     )
     return json.loads(response.choices[0].message.content)
+
+
+def stylometric_score(text):
+    """Signal 2: Stylometric heuristics. Returns 0.0 (human-like) to 1.0 (AI-like).
+
+    Three metrics:
+      1. Sentence-length CV   — low variance = uniform = AI signal
+      2. Transition density   — formal connectors per sentence = AI signal
+      3. Punctuation variety  — fewer distinct marks relative to total = AI signal
+    """
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+', text.strip()) if s.strip()]
+
+    # Metric 1: coefficient of variation of sentence word-lengths
+    # CV = stdev / mean; low CV → uniform rhythm → AI
+    if len(sentences) >= 3:
+        lengths = [len(s.split()) for s in sentences]
+        mean_len = statistics.mean(lengths)
+        cv = statistics.stdev(lengths) / mean_len if mean_len > 0 else 0
+        # CV 0.0 → score 1.0 (pure uniformity); CV ≥ 1.0 → score 0.0 (high variance)
+        cv_score = max(0.0, min(1.0, 1.0 - cv))
+    else:
+        cv_score = 0.5  # not enough sentences to judge
+
+    # Metric 2: transition phrase density per sentence
+    text_lower = text.lower()
+    hits = sum(1 for phrase in TRANSITION_PHRASES if phrase in text_lower)
+    density = hits / max(len(sentences), 1)
+    # 0 transitions → 0.0; ≥0.5 per sentence → 1.0
+    transition_score = min(1.0, density * 2.0)
+
+    # Metric 3: punctuation variety (inverted — diversity signals human authorship)
+    punct_chars = re.findall(r'[.,!?;:\'"–—…]', text)
+    if punct_chars:
+        variety_ratio = len(set(punct_chars)) / len(punct_chars)
+        # High variety (≥0.5) → human → low AI score; low variety → AI
+        punct_score = max(0.0, min(1.0, 1.0 - variety_ratio * 1.5))
+    else:
+        punct_score = 0.5
+
+    return round((cv_score + transition_score + punct_score) / 3, 4)
+
+
+def combine_signals(signal1_result, signal2_score):
+    """Merge Signal 1 (LLM) and Signal 2 (stylometric) into a single verdict.
+
+    Both signals are normalised to a 0–1 AI-likelihood scale before combining.
+    Weights: Signal 1 = 70% (semantic context), Signal 2 = 30% (surface heuristics).
+
+    Threshold verification against planning.md spec:
+      combined ≥ 0.85  → attribution "ai",    confidence ≥ 0.85 → "High-confidence AI-generated"
+      combined ≤ 0.15  → attribution "human", confidence ≥ 0.85 → "High-confidence human-written"
+      everything else  →                                           "Uncertain — provenance unclear"
+    """
+    s1_attribution = signal1_result.get("attribution", "uncertain")
+    s1_confidence  = float(signal1_result.get("confidence", 0.5))
+
+    # Convert Signal 1 to a 0–1 directional score (higher = more AI-like)
+    if s1_attribution == "ai":
+        s1_score = s1_confidence
+    elif s1_attribution == "human":
+        s1_score = 1.0 - s1_confidence
+    else:
+        s1_score = 0.5
+
+    combined = round(0.70 * s1_score + 0.30 * signal2_score, 4)
+
+    # Attribution bands
+    if combined >= 0.60:
+        attribution = "ai"
+    elif combined <= 0.40:
+        attribution = "human"
+    else:
+        attribution = "uncertain"
+
+    # Confidence = certainty in whichever direction we lean
+    # (symmetric: 0.90 combined → 0.90 confidence for AI; 0.10 combined → 0.90 for human)
+    confidence = round(max(combined, 1.0 - combined), 4)
+
+    return {
+        "attribution": attribution,
+        "confidence": confidence,
+        "label": attribution_to_label(attribution, confidence),
+        "signal1_score": round(s1_score, 4),
+        "signal2_score": round(signal2_score, 4),
+    }
 
 
 def attribution_to_label(attribution, confidence):
@@ -177,6 +273,8 @@ HOME_HTML = """<!DOCTYPE html>
             <div class="meta">
               Attribution: <strong>${data.attribution}</strong> &nbsp;|&nbsp;
               Confidence: <strong>${(data.confidence * 100).toFixed(1)}%</strong><br>
+              Signal 1 (LLM): <strong>${(data.signal1_score * 100).toFixed(1)}%</strong> &nbsp;|&nbsp;
+              Signal 2 (stylometric): <strong>${(data.signal2_score * 100).toFixed(1)}%</strong><br>
               Content ID: <code>${data.content_id}</code>
             </div>`;
         }
@@ -211,10 +309,9 @@ def submit():
     creator_id = data.get("creator_id", "anonymous")
     content_id = str(uuid.uuid4())
 
-    detection = classify_text(text)
-    attribution = detection.get("attribution", "uncertain")
-    confidence = float(detection.get("confidence", 0.5))
-    label = attribution_to_label(attribution, confidence)
+    signal1 = classify_text(text)
+    signal2 = stylometric_score(text)
+    result  = combine_signals(signal1, signal2)
 
     with sqlite3.connect(DB_PATH) as conn:
         conn.execute(
@@ -224,18 +321,20 @@ def submit():
                 creator_id,
                 datetime.now(timezone.utc).isoformat(),
                 text[:200],
-                attribution,
-                confidence,
-                label,
+                result["attribution"],
+                result["confidence"],
+                result["label"],
                 "classified",
             ),
         )
 
     return jsonify({
-        "content_id": content_id,
-        "attribution": attribution,
-        "confidence": confidence,
-        "label": label,
+        "content_id":    content_id,
+        "attribution":   result["attribution"],
+        "confidence":    result["confidence"],
+        "label":         result["label"],
+        "signal1_score": result["signal1_score"],
+        "signal2_score": result["signal2_score"],
     })
 
 
