@@ -4,7 +4,7 @@ import sqlite3
 import json
 from datetime import datetime, timezone
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, render_template_string
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 from groq import Groq
@@ -101,9 +101,103 @@ def attribution_to_label(attribution, confidence):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
+HOME_HTML = """<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Provenance Guard</title>
+  <style>
+    body { font-family: sans-serif; max-width: 680px; margin: 60px auto; padding: 0 16px; color: #222; }
+    h1 { font-size: 1.4rem; margin-bottom: 4px; }
+    p.sub { color: #666; margin-top: 0; font-size: 0.9rem; }
+    label { display: block; font-weight: 600; margin: 16px 0 4px; }
+    input[type=text], textarea {
+      width: 100%; box-sizing: border-box; padding: 8px;
+      border: 1px solid #ccc; border-radius: 4px; font-size: 0.95rem;
+    }
+    textarea { height: 160px; resize: vertical; }
+    button {
+      margin-top: 12px; padding: 10px 24px; background: #2563eb;
+      color: #fff; border: none; border-radius: 4px; cursor: pointer; font-size: 0.95rem;
+    }
+    button:disabled { background: #93c5fd; cursor: not-allowed; }
+    #result { margin-top: 24px; padding: 16px; border-radius: 6px; display: none; }
+    #result.ai      { background: #fef2f2; border: 1px solid #fca5a5; }
+    #result.human   { background: #f0fdf4; border: 1px solid #86efac; }
+    #result.uncertain { background: #fffbeb; border: 1px solid #fcd34d; }
+    .label { font-size: 1.05rem; font-weight: 700; margin-bottom: 8px; }
+    .meta  { font-size: 0.85rem; color: #555; }
+    .error { background: #fef2f2; border: 1px solid #fca5a5; color: #991b1b; }
+  </style>
+</head>
+<body>
+  <h1>Provenance Guard</h1>
+  <p class="sub">Submit text to classify its provenance — human-written or AI-generated.</p>
+
+  <label for="creator_id">Creator ID</label>
+  <input type="text" id="creator_id" placeholder="e.g. user-123" value="test-user-1">
+
+  <label for="text">Content</label>
+  <textarea id="text" placeholder="Paste the text you want to classify..."></textarea>
+
+  <button id="btn" onclick="submitContent()">Analyze</button>
+
+  <div id="result"></div>
+
+  <script>
+    async function submitContent() {
+      const text = document.getElementById("text").value.trim();
+      const creator_id = document.getElementById("creator_id").value.trim() || "anonymous";
+      const btn = document.getElementById("btn");
+      const result = document.getElementById("result");
+
+      if (!text) { alert("Please enter some text first."); return; }
+
+      btn.disabled = true;
+      btn.textContent = "Analyzing…";
+      result.style.display = "none";
+
+      try {
+        const res = await fetch("/submit", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, creator_id }),
+        });
+        const data = await res.json();
+
+        if (!res.ok) {
+          result.className = "error";
+          result.innerHTML = `<strong>Error:</strong> ${data.error}`;
+        } else {
+          const cls = data.attribution === "ai" ? "ai"
+                    : data.attribution === "human" ? "human" : "uncertain";
+          result.className = cls;
+          result.innerHTML = `
+            <div class="label">${data.label}</div>
+            <div class="meta">
+              Attribution: <strong>${data.attribution}</strong> &nbsp;|&nbsp;
+              Confidence: <strong>${(data.confidence * 100).toFixed(1)}%</strong><br>
+              Content ID: <code>${data.content_id}</code>
+            </div>`;
+        }
+        result.style.display = "block";
+      } catch (e) {
+        result.className = "error";
+        result.innerHTML = "<strong>Network error.</strong> Is the server running?";
+        result.style.display = "block";
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "Analyze";
+      }
+    }
+  </script>
+</body>
+</html>"""
+
+
 @app.route("/")
 def home():
-    return "Provenance Guard is running."
+    return render_template_string(HOME_HTML)
 
 
 @app.route("/submit", methods=["POST"])
